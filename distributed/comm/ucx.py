@@ -25,6 +25,8 @@ from ..utils import (
     parse_bytes,
 )
 
+from cudf._lib.nvtx import annotate
+
 logger = logging.getLogger(__name__)
 
 
@@ -191,26 +193,28 @@ class UCX(Comm):
 
                 # Send meta data
 
-                # Send # of frames (uint64)
-                await self.ep.send(struct.pack("Q", nframes))
-                # Send which frames are CUDA (bool) and
-                # how large each frame is (uint64)
-                await self.ep.send(
-                    struct.pack(nframes * "?" + nframes * "Q", *cuda_frames, *sizes)
-                )
+                with annotate("ucx_send_meta", color="blue", domain="distributed"):
+                    # Send # of frames (uint64)
+                    await self.ep.send(struct.pack("Q", nframes))
+                    # Send which frames are CUDA (bool) and
+                    # how large each frame is (uint64)
+                    await self.ep.send(
+                        struct.pack(nframes * "?" + nframes * "Q", *cuda_frames, *sizes)
+                    )
 
-                # Send frames
+                with annotate("ucx_send_frames", color="blue", domain="distributed"):
+                    # Send frames
 
-                # It is necessary to first synchronize the default stream before start sending
-                # We synchronize the default stream because UCX is not stream-ordered and
-                #  syncing the default stream will wait for other non-blocking CUDA streams.
-                # Note this is only sufficient if the memory being sent is not currently in use on
-                # non-blocking CUDA streams.
-                if any(cuda_frames):
-                    synchronize_stream(0)
+                    # It is necessary to first synchronize the default stream before start sending
+                    # We synchronize the default stream because UCX is not stream-ordered and
+                    #  syncing the default stream will wait for other non-blocking CUDA streams.
+                    # Note this is only sufficient if the memory being sent is not currently in use on
+                    # non-blocking CUDA streams.
+                    if any(cuda_frames):
+                        synchronize_stream(0)
 
-                for each_frame in send_frames:
-                    await self.ep.send(each_frame)
+                    for each_frame in send_frames:
+                        await self.ep.send(each_frame)
                 return sum(sizes)
             except (ucp.exceptions.UCXBaseException):
                 self.abort()
@@ -226,43 +230,48 @@ class UCX(Comm):
 
             try:
                 # Recv meta data
+                with annotate("ucx_recv_meta", color="red", domain="distributed"):
+                    # Recv # of frames (uint64)
+                    nframes_fmt = "Q"
+                    with annotate("host_array", domain="distributed"):
+                        nframes = host_array(struct.calcsize(nframes_fmt))
+                    await self.ep.recv(nframes)
+                    with annotate("struct_unpack", domain="distributed"):
+                        (nframes,) = struct.unpack(nframes_fmt, nframes)
 
-                # Recv # of frames (uint64)
-                nframes_fmt = "Q"
-                nframes = host_array(struct.calcsize(nframes_fmt))
-                await self.ep.recv(nframes)
-                (nframes,) = struct.unpack(nframes_fmt, nframes)
-
-                # Recv which frames are CUDA (bool) and
-                # how large each frame is (uint64)
-                header_fmt = nframes * "?" + nframes * "Q"
-                header = host_array(struct.calcsize(header_fmt))
-                await self.ep.recv(header)
-                header = struct.unpack(header_fmt, header)
-                cuda_frames, sizes = header[:nframes], header[nframes:]
+                    # Recv which frames are CUDA (bool) and
+                    # how large each frame is (uint64)
+                    header_fmt = nframes * "?" + nframes * "Q"
+                    with annotate("host_array", domain="distributed"):
+                        header = host_array(struct.calcsize(header_fmt))
+                    await self.ep.recv(header)
+                    with annotate("struct_unpack", domain="distributed"):
+                        header = struct.unpack(header_fmt, header)
+                    cuda_frames, sizes = header[:nframes], header[nframes:]
             except (ucp.exceptions.UCXBaseException, CancelledError):
                 self.abort()
                 raise CommClosedError("While reading, the connection was closed")
             else:
-                # Recv frames
-                frames = [
-                    device_array(each_size) if is_cuda else host_array(each_size)
-                    for is_cuda, each_size in zip(cuda_frames, sizes)
-                ]
-                recv_frames = [
-                    each_frame for each_frame in frames if len(each_frame) > 0
-                ]
+                with annotate("ucx_recv_frames", color="red", domain="distributed"):
+                    # Recv frames
+                    frames = [
+                        device_array(each_size) if is_cuda else host_array(each_size)
+                        for is_cuda, each_size in zip(cuda_frames, sizes)
+                    ]
+                    recv_frames = [
+                        each_frame for each_frame in frames if len(each_frame) > 0
+                    ]
 
-                # It is necessary to first populate `frames` with CUDA arrays and synchronize
-                # the default stream before starting receiving to ensure buffers have been allocated
-                if any(cuda_frames):
-                    synchronize_stream(0)
+                    # It is necessary to first populate `frames` with CUDA arrays and synchronize
+                    # the default stream before starting receiving to ensure buffers have been allocated
+                    if any(cuda_frames):
+                        synchronize_stream(0)
 
-                for each_frame in recv_frames:
-                    await self.ep.recv(each_frame)
-                msg = await from_frames(
-                    frames, deserialize=self.deserialize, deserializers=deserializers
-                )
+                    for each_frame in recv_frames:
+                        await self.ep.recv(each_frame)
+                    msg = await from_frames(
+                        frames, deserialize=self.deserialize, deserializers=deserializers
+                    )
                 return msg
 
     async def close(self):

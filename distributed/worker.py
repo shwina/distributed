@@ -1246,8 +1246,11 @@ class Worker(ServerNode):
         start = time()
 
         try:
-            compressed = await comm.write(msg, serializers=serializers)
-            response = await comm.read(deserializers=serializers)
+            from cudf._lib.nvtx import annotate
+            with annotate("comm_write", color="orange", domain="distributed"):
+                compressed = await comm.write(msg, serializers=serializers)
+            with annotate("comm_read", color="orange", domain="distributed"):
+                response = await comm.read(deserializers=serializers)
             assert response == "OK", response
         except EnvironmentError:
             logger.exception(
