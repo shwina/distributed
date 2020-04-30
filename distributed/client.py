@@ -42,7 +42,6 @@ from tornado.ioloop import IOLoop, PeriodicCallback
 from .batched import BatchedSend
 from .utils_comm import (
     WrappedKey,
-    unpack_remotedata,
     pack_data,
     subs_multiple,
     scatter_to_workers,
@@ -58,7 +57,7 @@ from .protocol.pickle import dumps, loads
 from .publish import Datasets
 from .pubsub import PubSubClientExtension
 from .security import Security
-from .sizeof import sizeof
+from .sizeof import sizeof as py_sizeof
 from .threadpoolexecutor import rejoin
 from .worker import dumps_task, get_client, get_worker, secede
 from .diagnostics.plugin import WorkerPlugin
@@ -82,7 +81,10 @@ from .utils import (
     CancelledError,
 )
 from . import versions as version_module
+from .utils_comm_cy import unpack_remotedata
 
+
+from cudf._lib.nvtx import annotate
 
 logger = logging.getLogger(__name__)
 
@@ -1680,7 +1682,7 @@ class Client(Node):
             kwargs2 = {}
             dsk = {}
             for k, v in kwargs.items():
-                if sizeof(v) > 1e5:
+                if py_sizeof(v) > 1e5:
                     vv = dask.delayed(v)
                     kwargs2[k] = vv._key
                     dsk.update(vv.dask)
@@ -1990,7 +1992,7 @@ class Client(Node):
 
             await self.scheduler.update_data(
                 who_has={key: [local_worker.address] for key in data},
-                nbytes=valmap(sizeof, data),
+                nbytes=valmap(py_sizeof, data),
                 client=self.id,
             )
 
@@ -2460,6 +2462,7 @@ class Client(Node):
         )
         return self.run(function, *args, **kwargs)
 
+    @annotate("_graph_to_futures", domain="dask")
     def _graph_to_futures(
         self,
         dsk,
@@ -2692,7 +2695,7 @@ class Client(Node):
             return collection
         else:
             return redict_collection(collection, dsk)
-
+        
     def compute(
         self,
         collections,
