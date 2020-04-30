@@ -2462,7 +2462,7 @@ class Client(Node):
         )
         return self.run(function, *args, **kwargs)
 
-    @annotate("_graph_to_futures", domain="dask")
+    @annotate("_graph_to_futures", domain="distributed")
     def _graph_to_futures(
         self,
         dsk,
